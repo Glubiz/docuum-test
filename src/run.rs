@@ -675,7 +675,6 @@ fn vacuum(
     if let Some(duration) = older_than {
         let now = SystemTime::now();
         let time_stamp = (now - *duration).duration_since(UNIX_EPOCH).unwrap();
-
         sorted_image_nodes.retain(|(_, image_node)| {
             image_node.last_used_since_epoch < time_stamp
         });
@@ -875,7 +874,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use {
-        super::{construct_polyforest, parse_docker_date, ImageNode, ImageRecord, RepositoryTag}, crate::state::{self, State}, std::{
+        super::{construct_polyforest, parse_docker_date, ImageNode, ImageRecord, RepositoryTag}, crate::{run::vacuum, state::{self, State}}, byte_unit::Byte, std::{
             collections::{HashMap, HashSet},
             io,
             time::Duration,
@@ -1423,6 +1422,81 @@ mod tests {
             image_graph.get(image_id_2),
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn clean_images_older_than() -> io::Result<()> {
+        // Arrange
+        let image_id_0 = "id-0";
+        let image_id_1 = "id-1";
+        let image_id_2 = "id-2";
+
+        let mut images = HashMap::new();
+        images.insert(
+            image_id_0.to_owned(),
+            state::Image {
+                parent_id: None,
+                last_used_since_epoch: Duration::from_secs(60 * 60),
+            },
+        );
+        images.insert(
+            image_id_1.to_owned(),
+            state::Image {
+                parent_id: Some(image_id_0.to_owned()),
+                last_used_since_epoch: Duration::from_secs(60 * 60 * 60),
+            },
+        );
+        images.insert(
+            image_id_2.to_owned(),
+            state::Image {
+                parent_id: Some(image_id_0.to_owned()),
+                last_used_since_epoch: Duration::from_secs(60 * 60 * 60 * 24),
+            },
+        );
+
+        let mut state = State { images };
+
+        let image_record_0 = ImageRecord {
+            parent_id: None,
+            created_since_epoch: Duration::from_secs(100),
+            repository_tags: vec![RepositoryTag {
+                repository: String::from("alpine"),
+                tag: String::from("latest"),
+            }],
+        };
+
+        let image_record_1 = ImageRecord {
+            parent_id: Some(image_id_0.to_owned()),
+            created_since_epoch: Duration::from_secs(101),
+            repository_tags: vec![RepositoryTag {
+                repository: String::from("debian"),
+                tag: String::from("latest"),
+            }],
+        };
+
+        let image_record_2 = ImageRecord {
+            parent_id: Some(image_id_0.to_owned()),
+            created_since_epoch: Duration::from_secs(102),
+            repository_tags: vec![RepositoryTag {
+                repository: String::from("ubuntu"),
+                tag: String::from("latest"),
+            }],
+        };
+
+        let mut image_records = HashMap::new();
+        image_records.insert(image_id_0.to_owned(), image_record_0.clone());
+        image_records.insert(image_id_1.to_owned(), image_record_1.clone());
+        image_records.insert(image_id_2.to_owned(), image_record_2.clone());
+        let image_ids_in_use = HashSet::new();
+        let image_graph = construct_polyforest(&state, true, &image_records, &image_ids_in_use)?;
+
+        // Act
+        let _ = vacuum(&mut state, false, Byte::from_str("10 GB").unwrap(), &None, 1, &Some(Duration::from_secs(60 * 60 * 60)));
+
+        // Assert
+        assert_eq!(2, image_graph.len());
+        
         Ok(())
     }
 }
